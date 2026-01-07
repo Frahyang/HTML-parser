@@ -1,5 +1,4 @@
 # Classes for HTML token types
-
 class Token:
   def __init__(self, start_pos = None, end_pos = None, line = None, col = None):
     self.start_pos = start_pos
@@ -51,8 +50,9 @@ class CharacterToken(Token):
     self.data = data
 
 class EOFToken(Token):
-  # Tells the program that its the end of the file
-  pass
+  def __init__(self, **kwargs):
+    super().__init__(**kwargs)
+    self.type = "EOF"
 
 # Core of the HTML Tokenizer
 
@@ -133,24 +133,43 @@ class HTMLTokenizer():
         return [CharacterToken("<" + (char or ""))]
 
   def tag_name_state(self):
-      char = self.consume()
-      if char is None:
-          return []
-      if char.isspace():
-          self.state = self.before_attribute_name_state
-          return []
-      elif char == "/":
-          self.state = self.self_closing_tag_state
-          return []
-      elif char == ">":
-          token = self.curr_token
-          token.end_pos = self.curr_pos
-          self.curr_token = None
-          self.state = self.data_state
-          return [token]
-      else:
-          self.curr_token.name += char
-          return []
+    char = self.consume()
+
+    if char is None:
+        raise ParseError("Unexpected EOF inside tag", self.curr_token)
+
+    # illegal: newline inside tag name
+    if char == "\n":
+        raise ParseError(
+            f"Malformed start tag <{self.curr_token.name}> (missing '>')",
+            self.curr_token
+        )
+
+    if char.isspace():
+        self.state = self.before_attribute_name_state
+        return []
+
+    elif char == "/":
+        self.state = self.self_closing_tag_state
+        return []
+
+    elif char == ">":
+        token = self.curr_token
+        token.end_pos = self.curr_pos
+        self.curr_token = None
+        self.state = self.data_state
+        return [token]
+
+    elif char == "<":
+        raise ParseError(
+            f"Malformed start tag <{self.curr_token.name}> (unexpected '<')",
+            self.curr_token
+        )
+
+    else:
+        self.curr_token.name += char
+        return []
+
 
   def end_tag_open_state(self):
       char = self.consume()
@@ -165,9 +184,7 @@ class HTMLTokenizer():
       else:
           return [CharacterToken("</" + (char or ""))]
 
-  ############################
-  # AI COPAS BELOW ###########
-  ############################
+  #
 
   def before_attribute_name_state(self):
     char = self.consume()
@@ -184,6 +201,12 @@ class HTMLTokenizer():
         self.curr_token = None
         self.state = self.data_state
         return [token]
+    elif char == "\n":
+        raise ParseError(
+            f"Malformed start tag <{self.curr_token.name}> (missing '>')",
+            self.curr_token
+        )
+
     else:
         # Start new attribute
         self.curr_attr_name = char
@@ -214,6 +237,10 @@ class HTMLTokenizer():
           self.state = self.before_attribute_value_state
           return []
       elif char == ">":
+        # Check for duplicate
+          if self.curr_attr_name in self.curr_token.attrs:
+             raise ParseError(f"Duplicate attribute '{self.curr_attr_name}'", self.curr_token)
+
           self.curr_token.attrs[self.curr_attr_name] = self.curr_attr_value
           token = self.curr_token
           self.curr_token = None
@@ -221,6 +248,10 @@ class HTMLTokenizer():
           return [token]
       else:
           # New attribute starting
+          # Check for duplicate
+          if self.curr_attr_name in self.curr_token.attrs:
+              raise ParseError(f"Duplicate attribute '{self.curr_attr_name}'", self.curr_token)
+
           self.curr_token.attrs[self.curr_attr_name] = self.curr_attr_value
           self.curr_attr_name = char
           self.curr_attr_value = ""
@@ -243,6 +274,10 @@ class HTMLTokenizer():
   def attribute_value_quoted_state(self):
       char = self.consume()
       if char == self.quote_char:
+          # CHECK FOR DUPLICATE BEFORE ASSIGNING
+          if self.curr_attr_name in self.curr_token.attrs:
+            raise ParseError(f"Duplicate attribute '{self.curr_attr_name}'", self.curr_token)
+
           self.curr_token.attrs[self.curr_attr_name] = self.curr_attr_value
           self.state = self.before_attribute_name_state
           return []
@@ -255,10 +290,18 @@ class HTMLTokenizer():
   def attribute_value_unquoted_state(self):
       char = self.consume()
       if char.isspace():
+          # CHECK FOR DUPLICATE
+          if self.curr_attr_name in self.curr_token.attrs:
+            raise ParseError(f"Duplicate attribute '{self.curr_attr_name}'", self.curr_token)
+
           self.curr_token.attrs[self.curr_attr_name] = self.curr_attr_value
           self.state = self.before_attribute_name_state
           return []
       elif char == ">":
+          # CHECK FOR DUPLICATE
+          if self.curr_attr_name in self.curr_token.attrs:
+            raise ParseError(f"Duplicate attribute '{self.curr_attr_name}'", self.curr_token)
+
           self.curr_token.attrs[self.curr_attr_name] = self.curr_attr_value
           token = self.curr_token
           self.curr_token = None
@@ -295,48 +338,196 @@ class HTMLTokenizer():
     return [CommentToken(data.strip("-"),  start_pos=start, end_pos=end, line=self.line, col=self.col)]
 
   def DOCTYPE_state(self):
-      # Capture where the DOCTYPE starts (before consuming)
-      start_line = self.line
-      start_col = self.col
-      start = self.curr_pos - 9  # approximate since we already saw "<!DOCTYPE"
+    start_line = self.line
+    start_col = self.col
+    start = self.curr_pos - 9
 
-      # Consume until '>'
-      while True:
-          char = self.consume()
-          if char == ">" or char is None:
-              break
+    while True:
+        char = self.consume()
 
-      end = self.curr_pos
-      end_line = self.line
-      end_col = self.col
+        if char == ">":
+            break
 
-      # Create the token using the *starting* position
-      token = DOCTYPEToken(
-          name="html",
-          start_pos=start,
-          end_pos=end,
-          line=start_line,   # start of the token
-          col=start_col      # start of the token
-      )
+        if char is None or char == "<" or self.line != start_line:
+            raise ParseError(
+                "Malformed DOCTYPE declaration (missing '>')",
+                token=DOCTYPEToken(
+                    start_pos=start,
+                    line=start_line,
+                    col=start_col
+                )
+            )
 
-      self.state = self.data_state
-      return [token]
+    end = self.curr_pos
+
+    token = DOCTYPEToken(
+        name="html",
+        start_pos=start,
+        end_pos=end,
+        line=start_line,
+        col=start_col
+    )
+
+    self.state = self.data_state
+    return [token]
+
+
+
+# Constants for semantic analysis
+
+# Void elements - tags that dont need a closing tag
+VOID_ELEMENTS = {
+    "area","base","br","col","embed","hr","img",
+    "input","link","meta","source","track","wbr"
+}
+
+# Block elements - block elements can contain inline, but incline cant contain block
+BLOCK_ELEMENTS = {
+    "address","article","aside","blockquote","canvas","dd","div","dl",
+    "dt","fieldset","figcaption","figure","footer","form","h1","h2",
+    "h3","h4","h5","h6","header","hr","li","main","nav","noscript",
+    "ol","p","pre","section","table","tfoot","ul","video"
+}
+
+# Strict parent rules - child must be inside one of these
+# key -> element, value -> parents
+REQUIRED_PARENTS = {
+    "li" : {"ul", "ol"},
+    "dt" : {"dl"},
+    "dd" : {"dl"},
+    "tr" : {"table", "tbody", "thead", "tfoot"},
+    "td" : {"tr"},
+    "th" : {"tr"},
+    "title" : {"head"},
+    "meta"  : {"head"}
+}
+
+ALLOWED_CHILDREN = {
+    "ul":    {"li"},
+    "ol":    {"li"},
+    "table": {"tr", "tbody", "thead", "tfoot"},
+    "tbody": {"tr"},
+    "thead": {"tr"},
+    "tfoot": {"tr"},
+    "tr":    {"td", "th"}
+}
+
+# A simple schema defining allowed attributes
+HTML_SCHEMA = {
+    # Attributes allowed on ANY tag
+    "global": {"id", "class", "style", "title", "lang", "hidden"},
+
+    # Attributes specific to certain tags
+    "tags": {
+        "html": set(),
+        "head": set(),
+        "body": set(),
+        "title": set(),
+        "span": set(),
+        "label": {"for"},
+        "button": {"typed","disabled","name","value"},
+        "iframe": {"src","width","height","frameborder","allow"},
+        "ol": {"type","start","reversed"},
+        "table": {"border", "cellpadding", "cellspacing"},
+        "tr": set(),
+        "th": {"scope", "colspan", "rowspan"},
+        "td": {"colspan", "rowspan"},
+        "h1": set(),
+        "h2": set(),
+        "h3": set(),
+        "h4": set(),
+        "h5": set(),
+        "h6": set(),
+        "ul": set(),
+        "li": set(),
+        "a":   {"href", "target", "rel"},
+        "img": {"src", "alt", "width", "height"},
+        "div": set(),
+        "p":   set(),
+        "input": {"type", "value", "placeholder", "required", "name"},
+        "form": {"action", "method"},
+        "meta": {"charset", "name", "content"},
+        "link": {"rel", "href", "type"}
+    },
+
+    # Required attributes (Strict mode)
+    "required": {
+        "img": {"src","alt"},
+        "a":   {"href"},
+        "iframe": {"src"},
+        "label": {"for"}
+    }
+}
+
+# Constants for value validation
+VALID_INPUT_TYPES = {
+    "text", "password", "email", "number", "checkbox",
+    "radio", "submit", "button", "date", "color",
+    "range", "hidden", "file", "search", "tel", "url"
+}
+
+class Node:
+  pass
+
+class Element(Node):
+    def __init__(self, tag, attrs, children, line=None, col=None):
+      self.type = "element"
+      self.tag = tag
+      self.attrs = attrs
+      self.children = children
+      self.line = line
+      self.col = col
+
+    def __repr__(self):
+      return f"Element({self.tag}, attrs={list(self.attrs.keys())}, children={len(self.children)})"
+
+class TextNode(Node):
+    def __init__(self, text):
+      self.type = "text"
+      self.text = text
+
+    def __repr__(self):
+        return f"Text({repr(self.text)})"
+
+class CommentNode(Node):
+    def __init__(self, text):
+      self.type = "comment"
+      self.data = text
+
+    def __repr__(self):
+        return f"Comment({repr(self.data)})"
+
 
 # Parser
 class ParseError(Exception):
     """Raised when the HTML parser encounters a syntax or grammar error."""
     def __init__(self, message, token=None):
+        self.token = token
+        self.line = None
+        self.col = None
+        self.length = 1  # default highlight length
+
         if token is not None:
-            pos_info = []
             if getattr(token, "line", None) is not None:
-                pos_info.append(f"line {token.line}")
+                self.line = token.line
             if getattr(token, "col", None) is not None:
-                pos_info.append(f"col {token.col}")
+                self.col = token.col
+
+            pos_info = []
+            if self.line is not None:
+                pos_info.append(f"line {self.line}")
+            if self.col is not None:
+                pos_info.append(f"col {self.col}")
             if pos_info:
                 message += f" (at {' '.join(pos_info)})"
+
             message += f" → token: {token}"
+
+            # Optional: smarter highlight length
+            if hasattr(token, "value"):
+                self.length = len(str(token.value))
+
         super().__init__(message)
-        self.token = token
 
 
 
@@ -346,10 +537,10 @@ class HTMLParser:
     Implements the RDP algorithm based on our EBNF grammar.
 
     Grammar Rules Implemented:
-    - document ::= DOCTYPE node*
+    - document ::= DOCTYPE nodes EOF
     - node     ::= element | COMMENT | TEXT
-    - element  ::= ( START_TAG nodes END_TAG ) | SELF_CLOSING_TAG
-    - nodes    ::= node*
+    - element  ::= START_TAG nodes END_TAG  | SELF_CLOSING_TAG | VOID_ELEMENT
+    - nodes    ::= {node}
     """
     def __init__(self, tokens):
         self.tokens = (t for t in tokens)
@@ -378,67 +569,107 @@ class HTMLParser:
       return self.current_token
 
     def parse(self):
-      # Implements: document ::= DOCTYPE node*
+      # Implements: document ::= DOCTYPE nodes EOF
 
       # DOCTYPE is required in our grammar
       self.consume(DOCTYPEToken)
-      # Parse 'node*'
-      self.parse_nodes(stop_at_types=[EOFToken])
+
+      root_nodes = self.parse_nodes(stop_at_types=[EOFToken])
 
       self.consume(EOFToken)
+      # look for html elements
+      html_elements = [node for node in root_nodes if isinstance(node, Element) and node.tag == "html"]
 
-      return
+      if len(html_elements) == 0:
+        raise ParseError("Document is missing an <html> element.")
+      elif len(html_elements) > 1:
+        raise ParseError(f"Document cannot have multiple <html> elements. Found {len(html_elements)}.")
+      # return the root element
+      return html_elements[0]
 
-    def parse_nodes(self, stop_at_types):
-      # Implements: nodes    ::= node*
+    def parse_nodes(self, stop_at_types, parent_tag=None):
+      # Implements: nodes ::= {node}
+        children = []
         while not isinstance(self.peek(), tuple(stop_at_types)):
-          self.parse_node()
+          node = self.parse_node(parent_tag=parent_tag)
+          if node:
+            children.append(node)
+        return children
 
-        return
-
-    def parse_node(self):
+    def parse_node(self, parent_tag=None):
       # Implements: node ::= element | COMMENT | TEXT
       token = self.peek()
 
       if token.type == "start_tag":
         # Choice element
-        self.parse_element()
+        return self.parse_element(parent_tag=parent_tag)
       elif token.type == "comment":
         # Choice comment
         self.consume()
+        return CommentNode(token.data)
       elif token.type == "character":
         # Choice text
         self.consume()
+        return TextNode(token.data)
       else:
         raise ParseError(
             f"Unexpected token in 'node' context: {token}",
             token=token
         )
 
-    def parse_element(self):
+    def parse_element(self, parent_tag = None):
       # Implements: element  ::= ( START_TAG nodes END_TAG ) | SELF_CLOSING_TAG
 
       token = self.peek()
+      # Handle void elements
+      if token.name in VOID_ELEMENTS:
+        start_token = self.consume() # Eat the tag (example: <br>)
+        return Element(start_token.name, start_token.attrs, children=[], line=start_token.line,
+                col=start_token.col)
 
+      # Handle self closing tag elements
       if token.type == "start_tag" and token.self_closing == True:
-        # Checks for self closing tag
-        self.consume()
-        return
-      # Consume start tag
+        start_token = self.consume()
+        return Element(start_token.name, start_token.attrs, children=[], line=start_token.line,
+                col=start_token.col)
+
+      # Normal elements
       start_token = self.consume()
+      current_tag = start_token.name
+
+      # Check required parents (e.g., <li> must be in <ul>)
+      if current_tag in REQUIRED_PARENTS:
+        allowed = REQUIRED_PARENTS[current_tag]
+        if parent_tag not in allowed:
+          raise ParseError(
+              f"<{current_tag}> must be inside {allowed}, but found in <{parent_tag}>",
+              token=start_token
+          )
+
+      # Check if a Block is inside an Inline element, raises an error if a block element inside an inline
+      if parent_tag and (parent_tag not in BLOCK_ELEMENTS) and (current_tag in BLOCK_ELEMENTS):
+        # exception: <body>
+         if parent_tag != "body" and parent_tag != "html":
+          raise ParseError(
+              f"Block element <{current_tag}> cannot be inside inline element <{parent_tag}>",
+              token=start_token
+          )
+
+
       # Parse nodes
-      self.parse_nodes(stop_at_types=[EndTagToken, EOFToken])
+      children = self.parse_nodes(stop_at_types=[EndTagToken, EOFToken], parent_tag=current_tag)
       # Consume end tag
       end_token = self.consume(EndTagToken)
 
-      # 4. Check for tag mismatch
+      # Check for tag mismatch
       if end_token.name != start_token.name:
         raise ParseError(
             f"Mismatched tag. Expected </{start_token.name}> but found </{end_token.name}>",
             token=end_token
         )
 
-      return
+      return Element(current_tag, start_token.attrs, children, line=start_token.line,
+                col=start_token.col)
 
 
 
@@ -480,44 +711,139 @@ def run_parser(name, html_code):
 
     except ParseError as e:
         print(f"\n[ERROR] Parse FAILED: {e}\n", file=sys.stderr)
+
+        if e.line is not None and e.col is not None:
+            lines = html_code.splitlines()
+
+            # Guard against out-of-range
+            if 1 <= e.line <= len(lines):
+                error_line = lines[e.line - 1]
+
+                print(f"  --> line {e.line}, column {e.col}", file=sys.stderr)
+                print(f"   |", file=sys.stderr)
+                print(f"{e.line:4} | {error_line}", file=sys.stderr)
+
+                # Build caret underline
+                caret_padding = " " * (e.col)
+                caret = "^" + "~" * max(e.length - 1, 0)
+
+                print(f"   | {caret_padding}{caret}\n", file=sys.stderr)
+
     except Exception as e:
         print(f"\n[CRITICAL ERROR] An unexpected error occurred: {e}\n", file=sys.stderr)
 
-# --- Test Case 1: Valid HTML ---
-valid_html = """
-<!DOCTYPE html>
-    <html>
-        <head>
-            <!-- This is a comment -->
-            <title>My Page</title>
-            <link rel="stylesheet" href="style.css" />
-        </head>
-        <body>
-            <h1 id="main-title">Hello World!</h1>
-            <p>This is a paragraph with a <a href="/more">link</a>.</p>
-            <br />
-        </body>
-    </html>
-"""
+def validate_semantics(node, context=None):
+  if context is None:
+    context = {
+        "ids": set(), # for checking duplicate id
+        "ancestors":set(), # for nesting check
+        "errors":[] # list to collect all errors
+    }
 
-# --- Test Case 2: Malformed HTML (Mismatched Tag) ---
-malformed_html = """
-    <!DOCTYPE html>
-    <html>
-        <body>
-            <h1>This is a title</h1>
-            <p>This is a paragraph.</p>
-        </body>
-    </div>
-"""
+  if node.type == 'element':
+    tag = node.tag
+    attrs = node.attrs.keys()
 
-# --- Test Case 3: Malformed HTML (Missing DOCTYPE) ---
-missing_doctype_html = """
-<html>
-        <head><title>Test</title></head>
-        <body><p>Hello</p></body>
-    </html>
-"""
+    # Check if its a valid html tag
+    if tag not in HTML_SCHEMA["tags"]:
+      context["errors"].append({
+        "line": node.line,
+        "message": f"Unknown or illegal tag: <{tag}>"
+      })
+
+    # Ensuring that there is only 1 head and body element in a html element
+    if tag == "html":
+      # Filter out comments or text
+      found_tags = []
+      # Check the children elements of the html element
+      for child in node.children:
+        if child.type == "element":
+          found_tags.append(child.tag)
+      # Checks if the order of head and body element is correct and that there is only 1 of each
+      if found_tags != ["head","body"]:
+        context["errors"].append(
+            f"[Line {node.line}] <html> structure invalid. Expected <head> followed by <body>, but found: {found_tags}"
+        )
+
+    # Check allowed children
+    if tag in ALLOWED_CHILDREN:
+      valid_children = ALLOWED_CHILDREN[tag]
+
+      for child in node.children:
+        if child.type == "element":
+          # If its not in valid children then set an error
+          if child.tag not in valid_children:
+            context["errors"].append(
+                f"[Line {child.line}] <{child.tag}> is not allowed directly inside <{tag}>. Allowed: {valid_children}"
+            )
+
+    # Checking for input types
+    if tag == "input":
+      # Check if input have type attribute
+      if "type" in node.attrs:
+        val = node.attrs["type"]
+        # Check if the type value is valid
+        if val not in VALID_INPUT_TYPES:
+          context["errors"].append(
+              f"[Line {node.line}] Invalid input type: '{val}'. Allowed types: {list(VALID_INPUT_TYPES)}"
+          )
+
+    # Checking for illegal attributes
+    allowed = HTML_SCHEMA["global"].copy()
+    if tag in HTML_SCHEMA["tags"]:
+      allowed.update(HTML_SCHEMA["tags"][tag])
+
+      for attr in attrs:
+        if attr not in allowed:
+          context["errors"].append(
+              f"[Line {node.line}] Attribute '{attr}' is NOT allowed on tag <{tag}>."
+          )
+
+    # Checking for missing required attributes
+    if tag in HTML_SCHEMA["required"]:
+      required = HTML_SCHEMA["required"][tag]
+      if not required.issubset(attrs):
+        missing = required - attrs
+        context["errors"].append(
+                    f"[Line {node.line}] Tag <{tag}> is missing required attribute(s): {missing}"
+        )
+
+    # Checking for duplicate IDs
+    if "id" in node.attrs:
+      id_val = node.attrs["id"]
+      if id_val in context["ids"]:
+        context["errors"].append(
+                    f"[Line {node.line}] Duplicate ID found: '{id_val}'"
+        )
+      context["ids"].add(id_val)
+
+    # Checking for nesting rules
+    forbidden_rules = {
+        "a": {"a", "button"},
+        "form": {"form"},
+        "button": {"button","a"}
+    }
+    if tag in forbidden_rules:
+      conflict = context["ancestors"].intersection(forbidden_rules[tag])
+      if conflict:
+        context["errors"].append(
+            f"[Line {node.line}] <{tag}> cannot be nested inside <{list(conflict)[0]}>"
+        )
+
+    # Update ancestors for children
+    new_ancestors = context["ancestors"].copy()
+    new_ancestors.add(tag)
+
+    child_context = {
+            "ids": context["ids"],
+            "errors": context["errors"],
+            "ancestors": new_ancestors
+    }
+
+    for child in node.children:
+            validate_semantics(child, child_context)
+
+  return context["errors"]
 
 if __name__ == "__main__":
     if "--tests" in sys.argv:
@@ -535,47 +861,64 @@ if __name__ == "__main__":
                 self.base_font = ("Consolas", 11)
 
                 self._build_layout()
+                self.html_text.tag_configure(
+                    "error",
+                    background="#5a1a1a",
+                    foreground="#ffffff"
+                )
+
+            def _highlight_error(self, line):
+                self.html_text.tag_remove("error", "1.0", tk.END)
+
+                start = f"{line}.0"
+                end = f"{line}.end"
+
+                self.html_text.tag_add("error", start, end)
+                self.html_text.see(start)
+
 
             def _build_layout(self):
+                # Toolbar
                 toolbar = ttk.Frame(self.root, padding=10)
                 toolbar.pack(fill=tk.X)
 
-                run_button = ttk.Button(toolbar, text="Run Parser", command=self.run_parser)
-                run_button.pack(side=tk.LEFT)
+                ttk.Button(toolbar, text="Run Parser", command=self.run_parser).pack(side=tk.LEFT)
+                ttk.Button(toolbar, text="Clear Outputs", command=self.clear_outputs).pack(side=tk.LEFT, padx=(10, 0))
 
-                clear_button = ttk.Button(toolbar, text="Clear Outputs", command=self.clear_outputs)
-                clear_button.pack(side=tk.LEFT, padx=(10, 0))
+                # MAIN vertical pane (editor/tokens on top, output at bottom)
+                vertical_pane = ttk.Panedwindow(self.root, orient=tk.VERTICAL)
+                vertical_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-                main_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
-                main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+                # ─────────────── TOP: editor + tokens ───────────────
+                top_pane = ttk.Panedwindow(vertical_pane, orient=tk.HORIZONTAL)
 
                 # HTML editor
-                editor_frame = ttk.Frame(main_pane)
+                editor_frame = ttk.Frame(top_pane)
                 self._add_label(editor_frame, "HTML Source")
                 self.html_text = self._create_scrolled_text(editor_frame)
                 self.html_text.pack(fill=tk.BOTH, expand=True)
+                top_pane.add(editor_frame, weight=3)
 
-                main_pane.add(editor_frame, weight=2)
-
-                # Side pane for tokens and errors
-                side_pane = ttk.Panedwindow(main_pane, orient=tk.VERTICAL)
-
-                tokens_frame = ttk.Frame(side_pane)
+                # Tokens panel
+                tokens_frame = ttk.Frame(top_pane)
                 self._add_label(tokens_frame, "Tokens")
                 self.tokens_text = self._create_scrolled_text(tokens_frame)
                 self.tokens_text.pack(fill=tk.BOTH, expand=True)
                 self.tokens_text.config(state=tk.DISABLED)
-                side_pane.add(tokens_frame, weight=3)
+                top_pane.add(tokens_frame, weight=2)
 
-                errors_frame = ttk.Frame(side_pane)
-                self._add_label(errors_frame, "Parser Output")
-                self.error_text = self._create_scrolled_text(errors_frame, height=8)
+                vertical_pane.add(top_pane, weight=4)
+
+                # ─────────────── BOTTOM: terminal output ───────────────
+                output_frame = ttk.Frame(vertical_pane)
+                self._add_label(output_frame, "Parser Output (Terminal)")
+                self.error_text = self._create_scrolled_text(output_frame, height=8)
                 self.error_text.pack(fill=tk.BOTH, expand=True)
                 self.error_text.config(state=tk.DISABLED)
-                side_pane.add(errors_frame, weight=1)
 
-                main_pane.add(side_pane, weight=1)
+                vertical_pane.add(output_frame, weight=1)
 
+                # Default HTML
                 default_html = dedent("""\
                 <!DOCTYPE html>
                 <html>
@@ -588,7 +931,7 @@ if __name__ == "__main__":
                 </html>
                 """)
                 self.html_text.insert(tk.END, default_html)
-
+ 
             def _add_label(self, parent, text):
                 lbl = ttk.Label(parent, text=text, font=("Segoe UI", 10, "bold"))
                 lbl.pack(anchor="w", padx=5, pady=(5, 0))
@@ -614,6 +957,8 @@ if __name__ == "__main__":
                     widget.config(state=tk.DISABLED)
 
             def run_parser(self):
+                self.html_text.tag_remove("error", "1.0", tk.END)
+
                 html_input = self.html_text.get("1.0", tk.END).strip()
                 self.clear_outputs()
 
@@ -627,10 +972,21 @@ if __name__ == "__main__":
                     self._append_tokens(tokens)
 
                     parser = HTMLParser(tokens)
-                    parser.parse()
-                    self._append_error("[SUCCESS] Parse complete. HTML is valid.")
+                    root = parser.parse()
+                    semantic_errors = validate_semantics(root)
+                    if semantic_errors:
+                        for err in semantic_errors:
+                            self._append_error(f"[SEMANTIC ERROR] {err}")
+                        # Highlight the FIRST semantic error location
+                        if semantic_errors[0]["line"] is not None:
+                            self._highlight_error(semantic_errors[0]["line"])
+                    else:
+                        self._append_error("[SUCCESS] Parse complete. HTML is valid.")
+
                 except ParseError as err:
                     self._append_error(f"[ERROR] {err}")
+                    if err.line is not None:
+                        self._highlight_error(err.line)
                 except Exception as err:
                     self._append_error(f"[CRITICAL ERROR] {err}")
 
