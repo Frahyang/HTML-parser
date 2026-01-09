@@ -618,7 +618,7 @@ class HTMLParser:
         )
 
     def parse_element(self, parent_tag = None):
-      # Implements: element  ::= ( START_TAG nodes END_TAG ) | SELF_CLOSING_TAG
+      # Implements: element  ::= START_TAG nodes END_TAG  | SELF_CLOSING_TAG | VOID_ELEMENT
 
       token = self.peek()
       # Handle void elements
