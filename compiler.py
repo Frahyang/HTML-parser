@@ -583,7 +583,16 @@ class HTMLParser:
       if len(html_elements) == 0:
         raise ParseError("Document is missing an <html> element.")
       elif len(html_elements) > 1:
-        raise ParseError(f"Document cannot have multiple <html> elements. Found {len(html_elements)}.")
+        second_html = html_elements[1]
+        raise ParseError(
+        "Document cannot have multiple <html> elements.",
+        token=StartTagToken(
+            name="html",
+            start_pos=None,
+            line=second_html.line,
+            col=second_html.col
+        )
+    )
       # return the root element
       return html_elements[0]
 
@@ -665,7 +674,7 @@ class HTMLParser:
       if end_token.name != start_token.name:
         raise ParseError(
             f"Mismatched tag. Expected </{start_token.name}> but found </{end_token.name}>",
-            token=end_token
+            token=start_token
         )
 
       return Element(current_tag, start_token.attrs, children, line=start_token.line,
@@ -779,14 +788,17 @@ def validate_semantics(node, context=None):
 
     # Checking for input types
     if tag == "input":
-      # Check if input have type attribute
       if "type" in node.attrs:
         val = node.attrs["type"]
-        # Check if the type value is valid
         if val not in VALID_INPUT_TYPES:
-          context["errors"].append(
-              f"[Line {node.line}] Invalid input type: '{val}'. Allowed types: {list(VALID_INPUT_TYPES)}"
-          )
+          context["errors"].append({
+              "line": node.line,
+              "message": (
+                  f"Invalid input type '{val}'. "
+                  f"Allowed types: {sorted(VALID_INPUT_TYPES)}"
+              )
+          })
+
 
     # Checking for illegal attributes
     allowed = HTML_SCHEMA["global"].copy()
@@ -795,27 +807,37 @@ def validate_semantics(node, context=None):
 
       for attr in attrs:
         if attr not in allowed:
-          context["errors"].append(
-              f"[Line {node.line}] Attribute '{attr}' is NOT allowed on tag <{tag}>."
-          )
+          context["errors"].append({
+                "line": node.line,
+                "message": (
+                    f"Attribute '{attr}' is NOT allowed on tag <{tag}>."
+                )
+            })
 
     # Checking for missing required attributes
     if tag in HTML_SCHEMA["required"]:
       required = HTML_SCHEMA["required"][tag]
       if not required.issubset(attrs):
         missing = required - attrs
-        context["errors"].append(
-                    f"[Line {node.line}] Tag <{tag}> is missing required attribute(s): {missing}"
-        )
+        context["errors"].append({
+            "line": node.line,
+            "message": (
+                f"Tag <{tag}> is missing required attribute(s): "
+                f"{', '.join(sorted(missing))}"
+            )
+        })
+
 
     # Checking for duplicate IDs
     if "id" in node.attrs:
-      id_val = node.attrs["id"]
-      if id_val in context["ids"]:
-        context["errors"].append(
-                    f"[Line {node.line}] Duplicate ID found: '{id_val}'"
-        )
-      context["ids"].add(id_val)
+        id_val = node.attrs["id"]
+        if id_val in context["ids"]:
+            context["errors"].append({
+                "line": node.line,
+                "message": f"Duplicate ID found: '{id_val}'"
+            })
+        context["ids"].add(id_val)
+
 
     # Checking for nesting rules
     forbidden_rules = {
@@ -826,9 +848,13 @@ def validate_semantics(node, context=None):
     if tag in forbidden_rules:
       conflict = context["ancestors"].intersection(forbidden_rules[tag])
       if conflict:
-        context["errors"].append(
-            f"[Line {node.line}] <{tag}> cannot be nested inside <{list(conflict)[0]}>"
-        )
+        context["errors"].append({
+            "line": node.line,
+            "message": (
+                f"<{tag}> cannot be nested inside <{list(conflict)[0]}>"
+            )
+        })
+
 
     # Update ancestors for children
     new_ancestors = context["ancestors"].copy()
