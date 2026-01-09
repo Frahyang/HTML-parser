@@ -846,11 +846,6 @@ def validate_semantics(node, context=None):
   return context["errors"]
 
 if __name__ == "__main__":
-    if "--tests" in sys.argv:
-        run_parser("Valid HTML", valid_html)
-        run_parser("Malformed HTML (Mismatched Tag)", malformed_html)
-        run_parser("Malformed HTML (Missing DOCTYPE)", missing_doctype_html)
-    else:
         class HTMLParserGUI:
             def __init__(self):
                 self.root = tk.Tk()
